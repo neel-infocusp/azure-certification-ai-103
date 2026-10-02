@@ -33,8 +33,8 @@ export function MetricsTab({ snapshot, totals }: Props) {
         <Stat label="Cached tokens" value={formatNumber(usage.cached_tokens)} />
       </div>
       <dl className="kv">
-        <dt>Finish reason</dt>
-        <dd>{formatText(response.finish_reason)}</dd>
+        <dt>Status</dt>
+        <dd>{formatText(response.status)}</dd>
         <dt>Model</dt>
         <dd>{formatText(request.model)}</dd>
         <dt>Response ID</dt>

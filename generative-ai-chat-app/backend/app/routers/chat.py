@@ -8,5 +8,5 @@ router = APIRouter(prefix="/api")
 
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest, llm: LlmService = Depends(get_llm_service)) -> ChatResponse:
-    """Round 1: one message in, one reply out. Nothing is remembered between calls."""
+    """Rounds 1-2: one message in, one reply out. Nothing is remembered between calls."""
     return llm.chat(request.message)

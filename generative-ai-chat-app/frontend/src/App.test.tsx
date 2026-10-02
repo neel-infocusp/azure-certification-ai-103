@@ -4,24 +4,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { formatLatency, formatNumber } from './lib/format'
 
-const HEALTH = { status: 'ok', model_deployment: 'gpt-test', endpoint_host: 'x.openai.azure.com', round: 1 }
+const HEALTH = { status: 'ok', model_deployment: 'gpt-test', endpoint_host: 'x.openai.azure.com', round: 2 }
 
 const CHAT = {
   reply: 'ELIZA was an early chatbot.',
   inspector: {
-    api: 'chat.completions',
+    api: 'responses',
     request: {
       model: 'gpt-test',
       stream: false,
-      messages: [
-        { role: 'system', content: 'Test system prompt.' },
-        { role: 'user', content: 'Tell me about the ELIZA chatbot.' },
-      ],
+      instructions: 'Test system prompt.',
+      input: 'Tell me about the ELIZA chatbot.',
     },
-    response: { id: 'chatcmpl-1', finish_reason: 'stop' },
+    response: { id: 'resp_1', status: 'completed' },
     usage: { input_tokens: 38, output_tokens: 410, total_tokens: 448, reasoning_tokens: null, cached_tokens: null },
     metrics: { latency_ms: 4200 },
     memory: { mode: 'none' },
+    raw: { id: 'resp_1', status: 'completed' },
   },
 }
 
@@ -49,18 +48,31 @@ describe('App', () => {
     render(<App />)
 
     expect(await screen.findByText('gpt-test')).toBeInTheDocument()
-    expect(screen.getByText('Round 1')).toBeInTheDocument()
+    expect(screen.getByText('Round 2')).toBeInTheDocument()
 
     await user.type(screen.getByLabelText('Message'), 'Tell me about the ELIZA chatbot.')
     await user.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(await screen.findByText('ELIZA was an early chatbot.')).toBeInTheDocument()
-    // Context tab is open by default and shows the exact messages sent.
-    expect(screen.getByText(/Test system prompt\./)).toBeInTheDocument()
+    // Context tab is open by default and shows the instructions and input sent.
+    expect(screen.getByText('Test system prompt.')).toBeInTheDocument()
+    expect(screen.getAllByText('Tell me about the ELIZA chatbot.').length).toBeGreaterThan(1)
+    expect(screen.getByText('Raw response')).toBeInTheDocument()
 
     await user.click(screen.getByRole('tab', { name: 'Metrics' }))
     expect(screen.getByText('4.2 s')).toBeInTheDocument()
     expect(screen.getAllByText('448')).not.toHaveLength(0)
+    expect(screen.getByText('resp_1')).toBeInTheDocument()
+    expect(screen.getByText('completed')).toBeInTheDocument()
+  })
+
+  it('explains in the Memory tab that nothing is remembered', async () => {
+    mockBackend(() => jsonResponse(CHAT))
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole('tab', { name: 'Memory' }))
+    expect(screen.getByText('No memory in this round.')).toBeInTheDocument()
   })
 
   it('shows a readable error and stays usable when the backend fails', async () => {
