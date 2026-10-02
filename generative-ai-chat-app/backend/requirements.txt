@@ -1,0 +1,9 @@
+fastapi>=0.142
+uvicorn[standard]>=0.54
+openai>=3.23
+azure-identity>=1.26
+pydantic-settings>=2.15
+
+# dev / test
+pytest>=9.1
+httpx>=0.28
