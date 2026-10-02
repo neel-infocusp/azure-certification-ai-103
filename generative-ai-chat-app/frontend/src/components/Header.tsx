@@ -4,13 +4,13 @@ import { ThemeToggle } from './ThemeToggle'
 
 interface Props {
   health: HealthState
-  canClear: boolean
-  onClear: () => void
+  canReset: boolean
+  onNewChat: () => void
   theme: Theme
   onToggleTheme: () => void
 }
 
-export function Header({ health, canClear, onClear, theme, onToggleTheme }: Props) {
+export function Header({ health, canReset, onNewChat, theme, onToggleTheme }: Props) {
   const label =
     health.status === 'ok'
       ? 'Connected'
@@ -37,8 +37,8 @@ export function Header({ health, canClear, onClear, theme, onToggleTheme }: Prop
       </div>
       <div className="header-actions">
         <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-        <button type="button" className="btn" onClick={onClear} disabled={!canClear}>
-          Clear chat
+        <button type="button" className="btn" onClick={onNewChat} disabled={!canReset}>
+          New chat
         </button>
       </div>
     </header>

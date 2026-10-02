@@ -19,8 +19,8 @@ export default function App() {
     <div className="app">
       <Header
         health={health}
-        canClear={chat.messages.length > 0}
-        onClear={chat.clear}
+        canReset={chat.messages.length > 0 && chat.status !== 'starting'}
+        onNewChat={chat.newChat}
         theme={theme}
         onToggleTheme={toggleTheme}
       />
@@ -51,7 +51,12 @@ export default function App() {
           className={`panel ${mobileView === 'inspector' ? '' : 'panel--hidden-mobile'}`}
           aria-label="Inspector"
         >
-          <InspectorPanel snapshot={chat.snapshot} totals={chat.totals} />
+          <InspectorPanel
+            snapshot={chat.snapshot}
+            turns={chat.turns}
+            totals={chat.totals}
+            sessionId={chat.sessionId}
+          />
         </aside>
       </main>
     </div>

@@ -12,7 +12,7 @@ export function ChatPanel({ messages, status, onSend }: Props) {
   return (
     <>
       <MessageList messages={messages} status={status} onPickSuggestion={onSend} />
-      <MessageInput disabled={status === 'waiting'} onSend={onSend} />
+      <MessageInput disabled={status === 'waiting' || status === 'starting'} onSend={onSend} />
     </>
   )
 }

@@ -22,7 +22,8 @@ export function MessageList({ messages, status, onPickSuggestion }: Props) {
       <div className="message-list message-list--empty">
         <p className="empty-title">Start a conversation</p>
         <p className="empty-hint">
-          Each message is sent on its own, so the AI will not remember earlier ones (yet).
+          The AI remembers this conversation, so you can ask follow-up questions. Use New chat
+          to start fresh.
         </p>
         <div className="suggestions">
           {SUGGESTIONS.map((text) => (

@@ -1,5 +1,6 @@
 import logging
 from functools import lru_cache
+from typing import Any
 
 import openai
 from azure.core.exceptions import ClientAuthenticationError
@@ -7,9 +8,9 @@ from openai import OpenAI
 
 from app.auth import build_api_key
 from app.config import Settings, get_settings
+from app.errors import ChatError
 from app.schemas import (
     ChatResponse,
-    ErrorCode,
     InspectorSnapshot,
     RequestView,
     ResponseView,
@@ -18,16 +19,6 @@ from app.schemas import (
 from app.services.metrics import Stopwatch, normalise_responses_usage
 
 logger = logging.getLogger(__name__)
-
-
-class ChatError(Exception):
-    """A failure we can show to the user: stable code, friendly message, HTTP status."""
-
-    def __init__(self, code: ErrorCode, message: str, status_code: int) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.status_code = status_code
 
 
 def map_exception(exc: Exception) -> ChatError:
@@ -72,21 +63,25 @@ def map_exception(exc: Exception) -> ChatError:
 
 
 class LlmService:
-    """The only place that talks to the OpenAI SDK (Round 2: Responses API)."""
+    """The only place that talks to the OpenAI SDK (Responses API)."""
 
     def __init__(self, client: OpenAI, settings: Settings) -> None:
         self._client = client
         self._settings = settings
 
-    def chat(self, user_text: str) -> ChatResponse:
+    def chat(self, user_text: str, previous_response_id: str | None = None) -> ChatResponse:
+        """Ask one question. Passing the previous response ID gives the model the earlier chat."""
         instructions = self._settings.system_prompt
+        params: dict[str, str] = {
+            "model": self._settings.model_deployment,
+            "instructions": instructions,
+            "input": user_text,
+        }
+        if previous_response_id:
+            params["previous_response_id"] = previous_response_id
         stopwatch = Stopwatch()
         try:
-            response = self._client.responses.create(
-                model=self._settings.model_deployment,
-                instructions=instructions,
-                input=user_text,
-            )
+            response = self._client.responses.create(**params)
         except Exception as exc:  # noqa: BLE001 - everything is mapped to a ChatError
             error = map_exception(exc)
             logger.warning("Model call failed: %s (%s)", error.code, type(exc).__name__)
@@ -111,6 +106,7 @@ class LlmService:
                 model=self._settings.model_deployment,
                 instructions=instructions,
                 input=user_text,
+                previous_response_id=previous_response_id,
                 stream=False,
             ),
             response=ResponseView(id=response.id, status=response.status),
@@ -119,6 +115,19 @@ class LlmService:
             raw=response.model_dump(mode="json"),
         )
         return ChatResponse(reply=response.output_text or "", inspector=inspector)
+
+
+    def list_input_items(self, response_id: str) -> tuple[list[dict[str, Any]] | None, str | None]:
+        """Best effort: what the service stored as the input of a response.
+
+        Returns (items, None) on success or (None, note) when the endpoint can't tell us.
+        """
+        try:
+            page = self._client.responses.input_items.list(response_id)
+            return [item.model_dump(mode="json") for item in page.data], None
+        except Exception as exc:  # noqa: BLE001 - optional feature, never fail the request
+            logger.info("Could not list input items: %s", type(exc).__name__)
+            return None, "The service did not return stored input items for this response."
 
 
 @lru_cache

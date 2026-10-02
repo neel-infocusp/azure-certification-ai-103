@@ -9,9 +9,9 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from app.config import get_settings
-from app.routers import chat, health
+from app.errors import ChatError
+from app.routers import chat, health, sessions
 from app.schemas import ErrorBody, ErrorResponse
-from app.services.llm_service import ChatError
 
 
 def _error_response(status_code: int, body: ErrorBody) -> JSONResponse:
@@ -57,6 +57,7 @@ def create_app() -> FastAPI:
         return _error_response(400, ErrorBody(code="bad_request", message=message))
 
     app.include_router(health.router)
+    app.include_router(sessions.router)
     app.include_router(chat.router)
     return app
 
