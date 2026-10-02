@@ -8,7 +8,6 @@ from openai import OpenAI
 from app.auth import build_api_key
 from app.config import Settings, get_settings
 from app.schemas import (
-    ChatMessage,
     ChatResponse,
     ErrorCode,
     InspectorSnapshot,
@@ -16,7 +15,7 @@ from app.schemas import (
     ResponseView,
     TurnMetrics,
 )
-from app.services.metrics import Stopwatch, normalise_chat_usage
+from app.services.metrics import Stopwatch, normalise_responses_usage
 
 logger = logging.getLogger(__name__)
 
@@ -73,22 +72,20 @@ def map_exception(exc: Exception) -> ChatError:
 
 
 class LlmService:
-    """The only place that talks to the OpenAI SDK (Round 1: Chat Completions)."""
+    """The only place that talks to the OpenAI SDK (Round 2: Responses API)."""
 
     def __init__(self, client: OpenAI, settings: Settings) -> None:
         self._client = client
         self._settings = settings
 
     def chat(self, user_text: str) -> ChatResponse:
-        messages = [
-            {"role": "system", "content": self._settings.system_prompt},
-            {"role": "user", "content": user_text},
-        ]
+        instructions = self._settings.system_prompt
         stopwatch = Stopwatch()
         try:
-            completion = self._client.chat.completions.create(
+            response = self._client.responses.create(
                 model=self._settings.model_deployment,
-                messages=messages,
+                instructions=instructions,
+                input=user_text,
             )
         except Exception as exc:  # noqa: BLE001 - everything is mapped to a ChatError
             error = map_exception(exc)
@@ -96,10 +93,12 @@ class LlmService:
             raise error from exc
         latency_ms = stopwatch.elapsed_ms()
 
-        choice = completion.choices[0] if completion.choices else None
-        reply = (choice.message.content if choice else None) or ""
-        usage = normalise_chat_usage(completion.usage)
+        if response.status == "failed":
+            detail = getattr(response.error, "message", None) or "the model reported a failure"
+            logger.warning("Response %s failed: %s", response.id, detail)
+            raise ChatError("upstream_error", f"The model could not answer: {detail}", 502)
 
+        usage = normalise_responses_usage(response.usage)
         logger.info(
             "turn done latency_ms=%s input_tokens=%s output_tokens=%s",
             latency_ms,
@@ -110,17 +109,16 @@ class LlmService:
         inspector = InspectorSnapshot(
             request=RequestView(
                 model=self._settings.model_deployment,
-                messages=[ChatMessage(**m) for m in messages],
+                instructions=instructions,
+                input=user_text,
                 stream=False,
             ),
-            response=ResponseView(
-                id=completion.id,
-                finish_reason=choice.finish_reason if choice else None,
-            ),
+            response=ResponseView(id=response.id, status=response.status),
             usage=usage,
             metrics=TurnMetrics(latency_ms=latency_ms),
+            raw=response.model_dump(mode="json"),
         )
-        return ChatResponse(reply=reply, inspector=inspector)
+        return ChatResponse(reply=response.output_text or "", inspector=inspector)
 
 
 @lru_cache

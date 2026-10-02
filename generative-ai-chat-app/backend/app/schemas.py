@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator
 
@@ -27,20 +27,16 @@ class ChatRequest(BaseModel):
         return value
 
 
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-
 class RequestView(BaseModel):
     model: str
-    messages: list[ChatMessage]
+    instructions: str
+    input: str
     stream: bool = False
 
 
 class ResponseView(BaseModel):
     id: str | None = None
-    finish_reason: str | None = None
+    status: str | None = None
 
 
 class Usage(BaseModel):
@@ -60,12 +56,14 @@ class MemoryView(BaseModel):
 
 
 class InspectorSnapshot(BaseModel):
-    api: Literal["chat.completions"] = "chat.completions"
+    api: Literal["responses"] = "responses"
     request: RequestView
     response: ResponseView
     usage: Usage
     metrics: TurnMetrics
     memory: MemoryView = MemoryView()
+    # The raw Responses API payload of this turn, for the "Raw response" viewer.
+    raw: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):

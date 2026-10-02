@@ -9,34 +9,47 @@ from app.main import create_app
 from app.services.llm_service import LlmService, get_llm_service
 
 
-def make_completion(
+class FakeResponse:
+    """Mimics the parts of an SDK Response object that our code reads."""
+
+    def __init__(
+        self,
+        output_text: str,
+        status: str,
+        usage: Any,
+        error: Any = None,
+    ) -> None:
+        self.id = "resp_test"
+        self.output_text = output_text
+        self.status = status
+        self.usage = usage
+        self.error = error
+
+    def model_dump(self, mode: str = "python") -> dict[str, Any]:
+        return {"id": self.id, "status": self.status, "output_text": self.output_text}
+
+
+def make_response(
     text: str = "Hello from the fake model.",
-    finish_reason: str = "stop",
+    status: str = "completed",
     usage: Any = "default",
-) -> SimpleNamespace:
+    error: Any = None,
+) -> FakeResponse:
     if usage == "default":
         usage = SimpleNamespace(
-            prompt_tokens=38,
-            completion_tokens=410,
+            input_tokens=38,
+            output_tokens=410,
             total_tokens=448,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=0),
-            completion_tokens_details=SimpleNamespace(reasoning_tokens=64),
+            input_tokens_details=SimpleNamespace(cached_tokens=0),
+            output_tokens_details=SimpleNamespace(reasoning_tokens=64),
         )
-    return SimpleNamespace(
-        id="chatcmpl-test",
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content=text), finish_reason=finish_reason
-            )
-        ],
-        usage=usage,
-    )
+    return FakeResponse(text, status, usage, error)
 
 
-class FakeCompletions:
+class FakeResponses:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
-        self.result: Any = make_completion()
+        self.result: Any = make_response()
         self.error: Exception | None = None
 
     def create(self, **kwargs: Any) -> Any:
@@ -48,8 +61,7 @@ class FakeCompletions:
 
 class FakeClient:
     def __init__(self) -> None:
-        self.completions = FakeCompletions()
-        self.chat = SimpleNamespace(completions=self.completions)
+        self.responses = FakeResponses()
 
 
 @pytest.fixture

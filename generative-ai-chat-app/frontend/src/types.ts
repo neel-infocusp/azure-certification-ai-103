@@ -1,19 +1,15 @@
 // Mirrors backend/app/schemas.py. Keep the two in sync.
 
-export interface ApiMessage {
-  role: string
-  content: string
-}
-
 export interface RequestView {
   model: string
-  messages: ApiMessage[]
+  instructions: string
+  input: string
   stream: boolean
 }
 
 export interface ResponseView {
   id: string | null
-  finish_reason: string | null
+  status: string | null
 }
 
 export interface Usage {
@@ -29,12 +25,13 @@ export interface TurnMetrics {
 }
 
 export interface InspectorSnapshot {
-  api: 'chat.completions'
+  api: 'responses'
   request: RequestView
   response: ResponseView
   usage: Usage
   metrics: TurnMetrics
   memory: { mode: 'none' }
+  raw: Record<string, unknown> | null
 }
 
 export interface ChatResponse {
