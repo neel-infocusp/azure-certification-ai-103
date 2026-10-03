@@ -1,11 +1,12 @@
 import type { SessionTotals } from '../../hooks/useChat'
-import type { InspectorSnapshot, TurnStat } from '../../types'
+import type { InspectorSnapshot, Stats, TurnStat } from '../../types'
 import { formatLatency, formatNumber, formatSpeed, formatText } from '../../lib/format'
 
 interface Props {
   snapshot: InspectorSnapshot | null
   turns: TurnStat[]
   totals: SessionTotals
+  stats: Stats | null
 }
 
 function Stat({ label, value }: { label: string; value: string }) {
@@ -17,9 +18,32 @@ function Stat({ label, value }: { label: string; value: string }) {
   )
 }
 
-export function MetricsTab({ snapshot, turns, totals }: Props) {
+function BackendStats({ stats }: { stats: Stats | null }) {
+  if (!stats) return null
+  return (
+    <>
+      <h3 className="tab-subtitle">Backend (all conversations)</h3>
+      <div className="stats">
+        <Stat label="In flight" value={formatNumber(stats.in_flight)} />
+        <Stat label="Served" value={formatNumber(stats.total_requests)} />
+        <Stat label="Avg latency" value={formatLatency(stats.avg_latency_ms)} />
+      </div>
+      <p className="note">
+        Model calls running right now, finished so far, and their average time. Open a second
+        browser tab and ask something while one answer is streaming: both run at the same time.
+      </p>
+    </>
+  )
+}
+
+export function MetricsTab({ snapshot, turns, totals, stats }: Props) {
   if (!snapshot) {
-    return <p className="placeholder">Send a message to see latency and token usage.</p>
+    return (
+      <div className="tab-body">
+        <p className="placeholder">Send a message to see latency and token usage.</p>
+        <BackendStats stats={stats} />
+      </div>
+    )
   }
   const { usage, metrics, response, request } = snapshot
   return (
@@ -79,6 +103,8 @@ export function MetricsTab({ snapshot, turns, totals }: Props) {
         <Stat label="Turns" value={formatNumber(totals.turns)} />
         <Stat label="Total tokens" value={formatNumber(totals.tokens)} />
       </div>
+
+      <BackendStats stats={stats} />
     </div>
   )
 }

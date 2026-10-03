@@ -1,14 +1,22 @@
+import asyncio
 import copy
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
 from app.main import create_app
 from app.services.llm_service import LlmService, get_llm_service
 from app.services.session_store import SessionStore, get_session_store
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    """Run `@pytest.mark.anyio` tests on asyncio only (trio is not installed)."""
+    return "asyncio"
 
 
 class FakeResponse:
@@ -49,14 +57,14 @@ def make_response(
 
 
 class FakeInputItems:
-    """Fake `client.responses.input_items`."""
+    """Fake `client.responses.input_items` (awaitable, like the async SDK)."""
 
     def __init__(self) -> None:
         self.requested: list[str] = []
         self.items: list[dict[str, Any]] = [{"type": "message", "role": "user"}]
         self.error: Exception | None = None
 
-    def list(self, response_id: str) -> Any:
+    async def list(self, response_id: str) -> Any:
         self.requested.append(response_id)
         if self.error:
             raise self.error
@@ -73,19 +81,29 @@ def completed_event(response: Any) -> SimpleNamespace:
 
 
 class FakeStream:
-    """Fake upstream stream: iterates over `items`; an Exception item is raised when reached."""
+    """Fake async upstream stream.
 
-    def __init__(self, items: list[Any]) -> None:
+    Iterates over `items` with `async for`; an Exception item is raised when reached.
+    `delay` seconds pass before each item, so tests can make a stream slow.
+    """
+
+    def __init__(self, items: list[Any], delay: float = 0.0) -> None:
         self._items = items
+        self._delay = delay
         self.closed = False
 
-    def __iter__(self) -> Any:
+    def __aiter__(self) -> Any:
+        return self._iterate()
+
+    async def _iterate(self) -> Any:
         for item in self._items:
+            if self._delay:
+                await asyncio.sleep(self._delay)
             if isinstance(item, Exception):
                 raise item
             yield item
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self.closed = True
 
 
@@ -95,6 +113,7 @@ class FakeResponses:
     With stream=True it returns a FakeStream. By default that streams the text of `result`
     in two chunks and then a completed event; set `stream_script` to script it yourself
     (the script may use the placeholder string "FINAL" for the completed event).
+    `delay` makes each call (or each streamed item) take that many seconds.
     """
 
     def __init__(self) -> None:
@@ -104,18 +123,21 @@ class FakeResponses:
         self.input_items = FakeInputItems()
         self.stream_script: list[Any] | None = None
         self.streams: list[FakeStream] = []
+        self.delay = 0.0
 
     def _fresh(self) -> Any:
         response = copy.copy(self.result)
         response.id = f"resp_{len(self.calls)}"
         return response
 
-    def create(self, **kwargs: Any) -> Any:
+    async def create(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
         if self.error:
             raise self.error
         response = self._fresh()
         if not kwargs.get("stream"):
+            if self.delay:
+                await asyncio.sleep(self.delay)
             return response
 
         if self.stream_script is None:
@@ -130,7 +152,7 @@ class FakeResponses:
         else:
             script = list(self.stream_script)
         items = [completed_event(response) if item == "FINAL" else item for item in script]
-        stream = FakeStream(items)
+        stream = FakeStream(items, delay=self.delay)
         self.streams.append(stream)
         return stream
 
@@ -161,11 +183,17 @@ def store() -> SessionStore:
 
 
 @pytest.fixture
-def client(settings: Settings, fake_client: FakeClient, store: SessionStore) -> TestClient:
-    app = create_app()
-    app.dependency_overrides[get_settings] = lambda: settings
-    app.dependency_overrides[get_llm_service] = lambda: LlmService(fake_client, settings)
-    app.dependency_overrides[get_session_store] = lambda: store
+def app(settings: Settings, fake_client: FakeClient, store: SessionStore) -> FastAPI:
+    """The real app, with the model client and session store replaced by fakes."""
+    application = create_app()
+    application.dependency_overrides[get_settings] = lambda: settings
+    application.dependency_overrides[get_llm_service] = lambda: LlmService(fake_client, settings)  # type: ignore[arg-type]
+    application.dependency_overrides[get_session_store] = lambda: store
+    return application
+
+
+@pytest.fixture
+def client(app: FastAPI) -> TestClient:
     return TestClient(app)
 
 

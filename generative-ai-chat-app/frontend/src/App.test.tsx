@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { formatLatency, formatNumber, formatSpeed } from './lib/format'
 
-const HEALTH = { status: 'ok', model_deployment: 'gpt-test', endpoint_host: 'x.openai.azure.com', round: 4 }
+const HEALTH = { status: 'ok', model_deployment: 'gpt-test', endpoint_host: 'x.openai.azure.com', round: 5 }
 
 const REPLY_1 = 'ELIZA was an early chatbot.'
 const REPLY_2 = 'It was far simpler than modern LLMs.'
@@ -90,6 +90,7 @@ function controlledStream(signal?: AbortSignal) {
 interface Backend {
   stream: (n: number, body: { message: string; session_id: string }, signal?: AbortSignal) => Response | Promise<Response>
   memory: () => Promise<Response>
+  stats: () => Promise<Response>
 }
 
 /** Fake backend: health, sessions, streaming chat and memory. Records every call. */
@@ -99,6 +100,9 @@ function mockBackend(backend: Partial<Backend> = {}) {
   const fetchMock = vi.fn((url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET'
     if (url === '/api/health') return jsonResponse(HEALTH)
+    if (url === '/api/stats') {
+      return backend.stats?.() ?? jsonResponse({ in_flight: 0, total_requests: 3, avg_latency_ms: 1200 })
+    }
     if (url === '/api/sessions' && method === 'POST') {
       sessions += 1
       return jsonResponse({ session_id: `s_${sessions}` }, 201)
@@ -170,7 +174,7 @@ describe('streaming chat', () => {
     render(<App />)
 
     expect(await screen.findByText('gpt-test')).toBeInTheDocument()
-    expect(screen.getByText('Round 4')).toBeInTheDocument()
+    expect(screen.getByText('Round 5')).toBeInTheDocument()
 
     await sendMessage(user, 'Tell me about the ELIZA chatbot.')
 
@@ -497,6 +501,64 @@ describe('failures and Stop', () => {
     expect(screen.queryByText(REPLY_1)).not.toBeInTheDocument()
     expect(screen.getByText('Start a conversation')).toBeInTheDocument()
     expect(fetchMock).toHaveBeenCalledWith('/api/sessions/s_1', { method: 'DELETE' })
+  })
+})
+
+// ---------- backend activity (async backend) ----------
+
+describe('backend activity', () => {
+  it('shows how many model calls are running, with the total served as a tooltip', async () => {
+    mockBackend()
+    render(<App />)
+
+    const badge = await screen.findByText('In flight: 0')
+    expect(badge).toHaveAttribute('title', expect.stringContaining('3 served'))
+  })
+
+  it('hides the readout when the backend cannot report its stats', async () => {
+    mockBackend({ stats: () => jsonResponse({ error: { code: 'upstream_error', message: 'no' } }, 500) })
+    render(<App />)
+
+    await screen.findByText('gpt-test')
+    expect(screen.queryByText(/In flight/)).not.toBeInTheDocument()
+  })
+
+  it('lists the backend numbers in the Metrics tab, even before the first message', async () => {
+    mockBackend()
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole('tab', { name: 'Metrics' }))
+
+    expect(await screen.findByText('Backend (all conversations)')).toBeInTheDocument()
+    expect(screen.getByText('Served').nextSibling?.textContent).toBe('3')
+    expect(screen.getByText('Avg latency').nextSibling?.textContent).toBe('1.2 s')
+  })
+
+  it('follows a running answer: busy while it streams, idle when it finishes', async () => {
+    let inFlight = 0
+    let feed!: ReturnType<typeof controlledStream>
+    mockBackend({
+      stats: () => jsonResponse({ in_flight: inFlight, total_requests: 3, avg_latency_ms: null }),
+      stream: (_n, _body, signal) => {
+        inFlight = 1
+        feed = controlledStream(signal)
+        return feed.response
+      },
+    })
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText('In flight: 0')
+
+    await sendMessage(user, 'hi')
+    feed.push(META() + delta('ELIZA was '))
+    expect(await screen.findByText('In flight: 1')).toBeInTheDocument()
+
+    inFlight = 0
+    feed.push(delta('an early chatbot.', 3))
+    feed.push(sse('completed', { reply: REPLY_1, inspector: inspector(1, REPLY_1, 'hi') }))
+    feed.close()
+    expect(await screen.findByText('In flight: 0')).toBeInTheDocument()
   })
 })
 

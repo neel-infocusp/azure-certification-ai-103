@@ -1,16 +1,16 @@
 import logging
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from functools import lru_cache
 from typing import Any
 
+import anyio
 import openai
 from azure.core.exceptions import ClientAuthenticationError
-from openai import OpenAI
+from fastapi import Request
+from openai import AsyncOpenAI
 
-from app.auth import build_api_key
-from app.config import Settings, get_settings
+from app.config import Settings
 from app.errors import ChatError
 from app.schemas import (
     ChatResponse,
@@ -103,20 +103,27 @@ def _failure_message(event: Any) -> str:
     return f"The model could not answer: {detail or 'it reported a failure'}"
 
 
-def _close_quietly(stream: Any) -> None:
+async def _close_quietly(stream: Any) -> None:
+    """Close the upstream stream, even if this request was just cancelled.
+
+    When the browser disconnects, this code runs inside a cancelled scope where every
+    `await` would be cancelled again. The shield lets the close finish, so the model stops
+    generating instead of running on unseen.
+    """
     close = getattr(stream, "close", None)
     if close is None:
         return
-    try:
-        close()
-    except Exception:  # noqa: BLE001 - closing is best effort
-        logger.debug("Closing the upstream stream failed", exc_info=True)
+    with anyio.CancelScope(shield=True):
+        try:
+            await close()
+        except Exception:  # noqa: BLE001 - closing is best effort
+            logger.debug("Closing the upstream stream failed", exc_info=True)
 
 
 class LlmService:
-    """The only place that talks to the OpenAI SDK (Responses API)."""
+    """The only place that talks to the OpenAI SDK (async Responses API)."""
 
-    def __init__(self, client: OpenAI, settings: Settings) -> None:
+    def __init__(self, client: AsyncOpenAI, settings: Settings) -> None:
         self._client = client
         self._settings = settings
 
@@ -141,12 +148,12 @@ class LlmService:
             stream=stream,
         )
 
-    def chat(self, user_text: str, previous_response_id: str | None = None) -> ChatResponse:
+    async def chat(self, user_text: str, previous_response_id: str | None = None) -> ChatResponse:
         """Ask one question and wait for the whole answer (no streaming)."""
         params = self._params(user_text, previous_response_id)
         stopwatch = Stopwatch()
         try:
-            response = self._client.responses.create(**params)
+            response = await self._client.responses.create(**params)
         except Exception as exc:  # noqa: BLE001 - everything is mapped to a ChatError
             error = map_exception(exc)
             logger.warning("Model call failed: %s (%s)", error.code, type(exc).__name__)
@@ -175,14 +182,15 @@ class LlmService:
         )
         return ChatResponse(reply=response.output_text or "", inspector=inspector)
 
-    def stream_chat(
+    async def stream_chat(
         self, user_text: str, previous_response_id: str | None = None
-    ) -> Iterator[StreamEvent]:
+    ) -> AsyncIterator[StreamEvent]:
         """Ask one question and yield the answer piece by piece.
 
         Yields `meta` first, then for every upstream event a `raw` (plus a `delta` when it
         carries text), and finally `completed` or `error`. Never raises: failures become an
-        `error` event. If the consumer stops early, the upstream stream is closed.
+        `error` event. If the consumer stops early (aclose or cancellation), the upstream
+        stream is closed.
         """
         request_view = self._request_view(user_text, previous_response_id, stream=True)
         yield StreamEvent(
@@ -197,10 +205,10 @@ class LlmService:
         seq = 0
         final: Any = None
         try:
-            stream = self._client.responses.create(
+            stream = await self._client.responses.create(
                 **self._params(user_text, previous_response_id), stream=True
             )
-            for event in stream:
+            async for event in stream:
                 seq += 1
                 event_type = getattr(event, "type", "")
                 yield StreamEvent(
@@ -226,7 +234,7 @@ class LlmService:
             return
         finally:
             if stream is not None:
-                _close_quietly(stream)
+                await _close_quietly(stream)
 
         if final is None:
             yield StreamEvent(
@@ -259,25 +267,27 @@ class LlmService:
         reply = "".join(text_parts) or (final.output_text or "")
         yield StreamEvent("completed", {"reply": reply, "inspector": inspector})
 
-    def list_input_items(self, response_id: str) -> tuple[list[dict[str, Any]] | None, str | None]:
+    async def list_input_items(
+        self, response_id: str
+    ) -> tuple[list[dict[str, Any]] | None, str | None]:
         """Best effort: what the service stored as the input of a response.
 
         Returns (items, None) on success or (None, note) when the endpoint can't tell us.
         """
         try:
-            page = self._client.responses.input_items.list(response_id)
+            page = await self._client.responses.input_items.list(response_id)
             return [item.model_dump(mode="json") for item in page.data], None
         except Exception as exc:  # noqa: BLE001 - optional feature, never fail the request
             logger.info("Could not list input items: %s", type(exc).__name__)
             return None, "The service did not return stored input items for this response."
 
 
-@lru_cache
-def get_llm_service() -> LlmService:
-    """FastAPI dependency. Tests override it with a fake client."""
-    settings = get_settings()
-    client = OpenAI(
-        base_url=settings.azure_openai_endpoint,
-        api_key=build_api_key(settings),
-    )
-    return LlmService(client, settings)
+def get_llm_service(request: Request) -> LlmService:
+    """FastAPI dependency: the service created at startup (see main.lifespan).
+
+    Tests override it with a service that uses a fake client.
+    """
+    service = getattr(request.app.state, "llm", None)
+    if service is None:
+        raise RuntimeError("The app has not started: the model client is created in the lifespan.")
+    return service
