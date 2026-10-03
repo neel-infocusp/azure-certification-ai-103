@@ -646,6 +646,67 @@ textarea:focus-visible {
   color: var(--muted);
 }
 
+.btn--stop {
+  background: var(--error-bg);
+  border-color: var(--error-border);
+  color: var(--error-text);
+  font-weight: 600;
+}
+
+.btn--stop:hover:not(:disabled) {
+  border-color: var(--error-text);
+}
+
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  background: var(--accent);
+  animation: blink 1s infinite ease-in-out;
+}
+
+.bubble-note {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.event-log {
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--code-bg);
+  font: 12px/1.6 var(--mono);
+}
+
+.event-row {
+  display: flex;
+  gap: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.event-seq {
+  flex: none;
+  min-width: 2.5em;
+  text-align: right;
+  color: var(--muted);
+}
+
+.event-type {
+  flex: none;
+  color: var(--accent);
+}
+
+.event-summary {
+  color: var(--text);
+}
+
 .code--wrap {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -758,6 +819,10 @@ code {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .caret {
+    animation: none;
+  }
+
   .dots span {
     animation: none;
     opacity: 0.6;

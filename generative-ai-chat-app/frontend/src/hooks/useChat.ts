@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, createSession, deleteSession, postChat } from '../api/client'
+import { ApiError, createSession, deleteSession, isAbortError, streamChat } from '../api/client'
 import type {
   ChatMessage,
   ChatRole,
   ChatStatus,
   InspectorSnapshot,
+  RawEvent,
+  StreamEvent,
   TurnStat,
 } from '../types'
 
@@ -19,10 +21,15 @@ export interface UseChat {
   snapshot: InspectorSnapshot | null
   turns: TurnStat[]
   totals: SessionTotals
+  rawEvents: RawEvent[]
   sessionId: string | null
   send: (text: string) => Promise<void>
+  stop: () => void
   newChat: () => void
 }
+
+/** The Raw events tab keeps only the latest events so a long answer cannot fill memory. */
+export const MAX_RAW_EVENTS = 200
 
 function errorMessage(err: unknown): string {
   return err instanceof ApiError ? err.message : 'Something went wrong.'
@@ -33,23 +40,32 @@ export function useChat(): UseChat {
   const [status, setStatus] = useState<ChatStatus>('starting')
   const [snapshot, setSnapshot] = useState<InspectorSnapshot | null>(null)
   const [turns, setTurns] = useState<TurnStat[]>([])
+  const [rawEvents, setRawEvents] = useState<RawEvent[]>([])
   const [sessionId, setSessionId] = useState<string | null>(null)
 
   const nextId = useRef(1)
   // The session id is mirrored in a ref so callbacks always see the latest value.
   const sessionRef = useRef<string | null>(null)
-  // Bumped by newChat() so a reply that arrives for the old conversation is dropped.
+  // Bumped by newChat() so events that arrive for the old conversation are dropped.
   const epoch = useRef(0)
   const busy = useRef(false)
   const started = useRef(false)
+  const abortRef = useRef<AbortController | null>(null)
 
-  const addMessage = useCallback((role: ChatRole, content: string) => {
-    setMessages((prev) => [...prev, { id: nextId.current++, role, content }])
+  const addMessage = useCallback((role: ChatRole, content: string): number => {
+    const id = nextId.current++
+    setMessages((prev) => [...prev, { id, role, content }])
+    return id
+  }, [])
+
+  const updateMessage = useCallback((id: number, patch: Partial<ChatMessage>) => {
+    setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, ...patch } : m)))
   }, [])
 
   const resetInspector = useCallback(() => {
     setSnapshot(null)
     setTurns([])
+    setRawEvents([])
   }, [])
 
   const startSession = useCallback(async (): Promise<string | null> => {
@@ -80,8 +96,77 @@ export function useChat(): UseChat {
 
       busy.current = true
       const myEpoch = epoch.current
+      const controller = new AbortController()
+      abortRef.current = controller
+
       addMessage('user', message)
       setStatus('waiting')
+      setRawEvents([])
+
+      let assistantId: number | null = null
+      let streamed = ''
+      let finished = false // a completed or error event arrived
+      let sessionLost = false
+
+      const fail = (text: string) => {
+        if (assistantId !== null) updateMessage(assistantId, { streaming: false })
+        addMessage('error', text)
+        setStatus('error')
+      }
+
+      const onEvent = (event: StreamEvent) => {
+        if (myEpoch !== epoch.current) return
+        switch (event.event) {
+          case 'raw':
+            setRawEvents((prev) => [...prev, event.data].slice(-MAX_RAW_EVENTS))
+            break
+          case 'delta':
+            streamed += event.data.text
+            if (assistantId === null) {
+              assistantId = nextId.current++
+              const id = assistantId
+              setMessages((prev) => [
+                ...prev,
+                { id, role: 'assistant', content: streamed, streaming: true },
+              ])
+              setStatus('streaming')
+            } else {
+              updateMessage(assistantId, { content: streamed })
+            }
+            break
+          case 'completed': {
+            finished = true
+            const { reply, inspector } = event.data
+            if (assistantId === null) {
+              addMessage('assistant', reply)
+            } else {
+              // The server's text is the one stored in memory, so show exactly that.
+              updateMessage(assistantId, { content: reply, streaming: false })
+            }
+            setSnapshot(inspector)
+            setTurns((prev) => [
+              ...prev,
+              {
+                index: prev.length + 1,
+                input_tokens: inspector.usage.input_tokens,
+                output_tokens: inspector.usage.output_tokens,
+                total_tokens: inspector.usage.total_tokens,
+                ttft_ms: inspector.metrics.ttft_ms,
+                latency_ms: inspector.metrics.latency_ms,
+              },
+            ])
+            setStatus('idle')
+            break
+          }
+          case 'error':
+            finished = true
+            sessionLost = event.data.code === 'session_not_found'
+            fail(event.data.message)
+            break
+          default:
+            break
+        }
+      }
 
       try {
         // If the first attempt to create a session failed, try again now.
@@ -91,40 +176,44 @@ export function useChat(): UseChat {
           return
         }
 
-        const result = await postChat(message, id)
-        if (myEpoch !== epoch.current) return
-
-        addMessage('assistant', result.reply)
-        setSnapshot(result.inspector)
-        setTurns((prev) => [
-          ...prev,
-          {
-            index: prev.length + 1,
-            input_tokens: result.inspector.usage.input_tokens,
-            output_tokens: result.inspector.usage.output_tokens,
-            total_tokens: result.inspector.usage.total_tokens,
-            latency_ms: result.inspector.metrics.latency_ms,
-          },
-        ])
-        setStatus('idle')
+        await streamChat(message, id, onEvent, controller.signal)
+        if (myEpoch === epoch.current && !finished) {
+          fail('The connection ended before the answer was complete.')
+        }
       } catch (err) {
         if (myEpoch !== epoch.current) return
-        addMessage('error', errorMessage(err))
-        if (err instanceof ApiError && err.code === 'session_not_found') {
-          // The server forgot this conversation (e.g. it restarted): start a fresh one.
-          resetInspector()
-          await startSession()
+        if (isAbortError(err)) {
+          // The user pressed Stop. The server saves nothing for an unfinished answer.
+          if (assistantId !== null) updateMessage(assistantId, { streaming: false, stopped: true })
+          setStatus('idle')
+        } else {
+          sessionLost = err instanceof ApiError && err.code === 'session_not_found'
+          fail(errorMessage(err))
         }
-        setStatus('error')
       } finally {
-        if (myEpoch === epoch.current) busy.current = false
+        if (myEpoch === epoch.current) {
+          busy.current = false
+          abortRef.current = null
+        }
+      }
+
+      if (sessionLost && myEpoch === epoch.current) {
+        // The server forgot this conversation (e.g. it restarted): start a fresh one.
+        resetInspector()
+        await startSession()
       }
     },
-    [addMessage, resetInspector, startSession],
+    [addMessage, updateMessage, resetInspector, startSession],
   )
+
+  const stop = useCallback(() => {
+    abortRef.current?.abort()
+  }, [])
 
   const newChat = useCallback(() => {
     epoch.current += 1
+    abortRef.current?.abort()
+    abortRef.current = null
     busy.current = false
     const old = sessionRef.current
     if (old) void deleteSession(old).catch(() => {}) // best effort, the server also caps sessions
@@ -142,5 +231,5 @@ export function useChat(): UseChat {
     tokens: turns.reduce((sum, turn) => sum + (turn.total_tokens ?? 0), 0),
   }
 
-  return { messages, status, snapshot, turns, totals, sessionId, send, newChat }
+  return { messages, status, snapshot, turns, totals, rawEvents, sessionId, send, stop, newChat }
 }

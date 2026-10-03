@@ -45,7 +45,12 @@ export default function App() {
           className={`panel ${mobileView === 'chat' ? '' : 'panel--hidden-mobile'}`}
           aria-label="Chat"
         >
-          <ChatPanel messages={chat.messages} status={chat.status} onSend={chat.send} />
+          <ChatPanel
+            messages={chat.messages}
+            status={chat.status}
+            onSend={chat.send}
+            onStop={chat.stop}
+          />
         </section>
         <aside
           className={`panel ${mobileView === 'inspector' ? '' : 'panel--hidden-mobile'}`}
@@ -54,6 +59,7 @@ export default function App() {
           <InspectorPanel
             snapshot={chat.snapshot}
             turns={chat.turns}
+            rawEvents={chat.rawEvents}
             totals={chat.totals}
             sessionId={chat.sessionId}
           />

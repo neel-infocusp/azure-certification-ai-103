@@ -10,12 +10,24 @@ interface Props {
 
 const SUGGESTIONS = ['Tell me about the ELIZA chatbot.', 'How does it compare to modern LLMs?']
 
-export function MessageList({ messages, status, onPickSuggestion }: Props) {
-  const endRef = useRef<HTMLDivElement>(null)
+/** How close to the bottom (px) counts as "following" the answer as it streams in. */
+const FOLLOW_THRESHOLD_PX = 80
 
+export function MessageList({ messages, status, onPickSuggestion }: Props) {
+  const listRef = useRef<HTMLDivElement>(null)
+  const following = useRef(true)
+
+  // Keep the newest text in view, unless the user scrolled up to read something earlier.
   useEffect(() => {
-    endRef.current?.scrollIntoView?.({ block: 'end' })
+    const el = listRef.current
+    if (el && following.current) el.scrollTop = el.scrollHeight
   }, [messages, status])
+
+  const onScroll = () => {
+    const el = listRef.current
+    if (!el) return
+    following.current = el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX
+  }
 
   if (messages.length === 0 && status !== 'waiting') {
     return (
@@ -37,7 +49,7 @@ export function MessageList({ messages, status, onPickSuggestion }: Props) {
   }
 
   return (
-    <div className="message-list" role="log" aria-live="polite">
+    <div className="message-list" role="log" aria-live="polite" ref={listRef} onScroll={onScroll}>
       {messages.map((m) => (
         <div key={m.id} className={`bubble bubble--${m.role}`}>
           <span className="bubble-author">
@@ -47,6 +59,10 @@ export function MessageList({ messages, status, onPickSuggestion }: Props) {
             <Markdown>{m.content}</Markdown>
           ) : (
             <div className="bubble-text">{m.content}</div>
+          )}
+          {m.streaming && <span className="caret" aria-hidden="true" />}
+          {m.stopped && (
+            <span className="bubble-note">Stopped. This answer is not saved to the conversation.</span>
           )}
         </div>
       ))}
@@ -63,7 +79,6 @@ export function MessageList({ messages, status, onPickSuggestion }: Props) {
           </div>
         </div>
       )}
-      <div ref={endRef} />
     </div>
   )
 }

@@ -23,6 +23,9 @@ export interface Usage {
 
 export interface TurnMetrics {
   latency_ms: number
+  /** Streaming only: time until the first text arrived. */
+  ttft_ms: number | null
+  chunk_count: number | null
 }
 
 export interface TranscriptMessage {
@@ -52,11 +55,6 @@ export interface InspectorSnapshot {
   raw: Record<string, unknown> | null
 }
 
-export interface ChatResponse {
-  reply: string
-  inspector: InspectorSnapshot
-}
-
 export interface HealthResponse {
   status: 'ok'
   model_deployment: string
@@ -81,9 +79,13 @@ export interface ChatMessage {
   id: number
   role: ChatRole
   content: string
+  /** The answer is still arriving. */
+  streaming?: boolean
+  /** The user pressed Stop before the answer finished. */
+  stopped?: boolean
 }
 
-export type ChatStatus = 'starting' | 'idle' | 'waiting' | 'error'
+export type ChatStatus = 'starting' | 'idle' | 'waiting' | 'streaming' | 'error'
 
 /** One row of the per-turn token table in the Metrics tab. */
 export interface TurnStat {
@@ -91,5 +93,21 @@ export interface TurnStat {
   input_tokens: number | null
   output_tokens: number | null
   total_tokens: number | null
+  ttft_ms: number | null
   latency_ms: number
 }
+
+/** One event the model sent while streaming, for the Raw events tab. */
+export interface RawEvent {
+  seq: number
+  type: string
+  summary: string
+}
+
+/** Events of the /api/chat/stream Server-Sent Events stream. */
+export type StreamEvent =
+  | { event: 'meta'; data: { turn_id: string; request: RequestView } }
+  | { event: 'delta'; data: { text: string } }
+  | { event: 'raw'; data: RawEvent }
+  | { event: 'completed'; data: { reply: string; inspector: InspectorSnapshot } }
+  | { event: 'error'; data: { code: ErrorCode; message: string } }
