@@ -1,6 +1,6 @@
 import type { SessionTotals } from '../../hooks/useChat'
 import type { InspectorSnapshot, TurnStat } from '../../types'
-import { formatLatency, formatNumber, formatText } from '../../lib/format'
+import { formatLatency, formatNumber, formatSpeed, formatText } from '../../lib/format'
 
 interface Props {
   snapshot: InspectorSnapshot | null
@@ -27,6 +27,9 @@ export function MetricsTab({ snapshot, turns, totals }: Props) {
       <h3 className="tab-subtitle">Last turn</h3>
       <div className="stats">
         <Stat label="Latency" value={formatLatency(metrics.latency_ms)} />
+        <Stat label="First token" value={formatLatency(metrics.ttft_ms)} />
+        <Stat label="Chunks" value={formatNumber(metrics.chunk_count)} />
+        <Stat label="Speed" value={formatSpeed(usage.output_tokens, metrics)} />
         <Stat label="Input tokens" value={formatNumber(usage.input_tokens)} />
         <Stat label="Output tokens" value={formatNumber(usage.output_tokens)} />
         <Stat label="Total tokens" value={formatNumber(usage.total_tokens)} />
@@ -50,6 +53,7 @@ export function MetricsTab({ snapshot, turns, totals }: Props) {
               <th scope="col">Turn</th>
               <th scope="col">Input</th>
               <th scope="col">Output</th>
+              <th scope="col">First token</th>
               <th scope="col">Latency</th>
             </tr>
           </thead>
@@ -59,6 +63,7 @@ export function MetricsTab({ snapshot, turns, totals }: Props) {
                 <td>{turn.index}</td>
                 <td>{formatNumber(turn.input_tokens)}</td>
                 <td>{formatNumber(turn.output_tokens)}</td>
+                <td>{formatLatency(turn.ttft_ms)}</td>
                 <td>{formatLatency(turn.latency_ms)}</td>
               </tr>
             ))}

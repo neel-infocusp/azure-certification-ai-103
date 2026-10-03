@@ -10,7 +10,7 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 # Which round of the exercise this build implements (shown in the UI header).
-CURRENT_ROUND = 3
+CURRENT_ROUND = 4
 
 
 class Settings(BaseSettings):

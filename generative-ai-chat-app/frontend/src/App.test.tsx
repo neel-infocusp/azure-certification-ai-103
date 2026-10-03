@@ -2,49 +2,97 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
-import { formatLatency, formatNumber } from './lib/format'
+import { formatLatency, formatNumber, formatSpeed } from './lib/format'
 
-const HEALTH = { status: 'ok', model_deployment: 'gpt-test', endpoint_host: 'x.openai.azure.com', round: 3 }
+const HEALTH = { status: 'ok', model_deployment: 'gpt-test', endpoint_host: 'x.openai.azure.com', round: 4 }
 
-function chatReply(n: number, reply = 'ELIZA was an early chatbot.', input = 'Tell me about the ELIZA chatbot.') {
-  const chain = Array.from({ length: n }, (_, i) => `resp_${i + 1}`)
+const REPLY_1 = 'ELIZA was an early chatbot.'
+const REPLY_2 = 'It was far simpler than modern LLMs.'
+
+// ---------- fake SSE backend ----------
+
+function sse(event: string, data: unknown): string {
+  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+}
+
+function inspector(n: number, reply: string, input: string) {
   return {
-    reply,
-    inspector: {
-      api: 'responses',
-      request: {
-        model: 'gpt-test',
-        stream: false,
-        instructions: 'Test system prompt.',
-        input,
-        previous_response_id: n > 1 ? `resp_${n - 1}` : null,
-      },
-      response: { id: `resp_${n}`, status: 'completed' },
-      usage: { input_tokens: 38 * n, output_tokens: 410, total_tokens: 38 * n + 410, reasoning_tokens: null, cached_tokens: null },
-      metrics: { latency_ms: 4200 },
-      memory: {
-        mode: 'previous_response_id',
-        response_chain: chain,
-        transcript: [
-          { role: 'user', content: input },
-          { role: 'assistant', content: reply },
-        ],
-      },
-      raw: { id: `resp_${n}`, status: 'completed' },
+    api: 'responses',
+    request: {
+      model: 'gpt-test',
+      stream: true,
+      instructions: 'Test system prompt.',
+      input,
+      previous_response_id: n > 1 ? `resp_${n - 1}` : null,
     },
+    response: { id: `resp_${n}`, status: 'completed' },
+    usage: { input_tokens: 38 * n, output_tokens: 400, total_tokens: 38 * n + 400, reasoning_tokens: null, cached_tokens: null },
+    metrics: { latency_ms: 4200, ttft_ms: 900, chunk_count: 2 },
+    memory: {
+      mode: 'previous_response_id',
+      response_chain: Array.from({ length: n }, (_, i) => `resp_${i + 1}`),
+      transcript: [
+        { role: 'user', content: input },
+        { role: 'assistant', content: reply },
+      ],
+    },
+    raw: { id: `resp_${n}`, status: 'completed' },
   }
+}
+
+const META = (input = 'hi') =>
+  sse('meta', { turn_id: 't_1', request: inspector(1, '', input).request })
+
+const RAW_CREATED = sse('raw', { seq: 1, type: 'response.created', summary: 'resp_1 in_progress' })
+
+function delta(text: string, seq = 2) {
+  return sse('delta', { text }) + sse('raw', { seq, type: 'response.output_text.delta', summary: text })
+}
+
+/** A whole streamed answer as SSE text. */
+function fullStream(n: number, reply: string, input = 'hi'): string {
+  const half = Math.floor(reply.length / 2)
+  return (
+    META(input) +
+    RAW_CREATED +
+    delta(reply.slice(0, half), 2) +
+    delta(reply.slice(half), 3) +
+    sse('raw', { seq: 4, type: 'response.completed', summary: `resp_${n} completed` }) +
+    sse('completed', { reply, inspector: inspector(n, reply, input) })
+  )
+}
+
+function sseResponse(text: string, status = 200): Response {
+  return new Response(text, { status, headers: { 'Content-Type': 'text/event-stream' } })
 }
 
 function jsonResponse(body: unknown, status = 200) {
   return Promise.resolve(new Response(JSON.stringify(body), { status }))
 }
 
-interface Backend {
-  chat: (n: number, body: { message: string; session_id: string }) => Promise<Response>
-  memory?: () => Promise<Response>
+/** A streamed response the test feeds by hand. Aborting the request errors the stream. */
+function controlledStream(signal?: AbortSignal) {
+  const encoder = new TextEncoder()
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const body = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c
+      signal?.addEventListener('abort', () => c.error(new DOMException('Aborted', 'AbortError')))
+    },
+  })
+  return {
+    response: new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }),
+    push: (text: string) => controller.enqueue(encoder.encode(text)),
+    close: () => controller.close(),
+  }
 }
 
-/** Fake backend: health, sessions, chat and memory. Records every call. */
+interface Backend {
+  stream: (n: number, body: { message: string; session_id: string }, signal?: AbortSignal) => Response | Promise<Response>
+  memory: () => Promise<Response>
+}
+
+/** Fake backend: health, sessions, streaming chat and memory. Records every call. */
 function mockBackend(backend: Partial<Backend> = {}) {
   let sessions = 0
   let turn = 0
@@ -71,10 +119,12 @@ function mockBackend(backend: Partial<Backend> = {}) {
         })
       )
     }
-    if (url === '/api/chat') {
+    if (url === '/api/chat/stream') {
       turn += 1
       const body = JSON.parse(String(init?.body))
-      return backend.chat ? backend.chat(turn, body) : jsonResponse(chatReply(turn))
+      return Promise.resolve(
+        backend.stream ? backend.stream(turn, body, init?.signal ?? undefined) : sseResponse(fullStream(turn, REPLY_1, body.message)),
+      )
     }
     return Promise.resolve(new Response('not found', { status: 404 }))
   })
@@ -82,17 +132,27 @@ function mockBackend(backend: Partial<Backend> = {}) {
   return fetchMock
 }
 
-function chatCalls(fetchMock: ReturnType<typeof mockBackend>) {
+type FetchMock = ReturnType<typeof mockBackend>
+
+function chatCalls(fetchMock: FetchMock) {
   return fetchMock.mock.calls
-    .filter(([url]) => url === '/api/chat')
+    .filter(([url]) => url === '/api/chat/stream')
     .map(([, init]) => JSON.parse(String(init?.body)))
 }
 
-async function sendMessage(user: ReturnType<typeof userEvent.setup>, text: string) {
+function sessionCreations(fetchMock: FetchMock) {
+  return fetchMock.mock.calls.filter(([url, init]) => url === '/api/sessions' && init?.method === 'POST').length
+}
+
+type User = ReturnType<typeof userEvent.setup>
+
+async function sendMessage(user: User, text: string) {
   const input = await screen.findByLabelText('Message')
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled())
   await user.type(input, text)
-  await user.click(screen.getByRole('button', { name: 'Send' }))
+  // Send is only enabled once the session exists and there is text.
+  const send = await screen.findByRole('button', { name: 'Send' })
+  await waitFor(() => expect(send).toBeEnabled())
+  await user.click(send)
 }
 
 afterEach(() => {
@@ -101,48 +161,80 @@ afterEach(() => {
   delete document.documentElement.dataset.theme
 })
 
-describe('App', () => {
-  it('creates a session, shows health info, sends a message and fills the inspector', async () => {
+// ---------- streaming chat ----------
+
+describe('streaming chat', () => {
+  it('creates a session, streams the answer and fills the inspector', async () => {
     const fetchMock = mockBackend()
     const user = userEvent.setup()
     render(<App />)
 
     expect(await screen.findByText('gpt-test')).toBeInTheDocument()
-    expect(screen.getByText('Round 3')).toBeInTheDocument()
+    expect(screen.getByText('Round 4')).toBeInTheDocument()
 
     await sendMessage(user, 'Tell me about the ELIZA chatbot.')
 
-    expect(await screen.findByText('ELIZA was an early chatbot.')).toBeInTheDocument()
+    expect(await screen.findByText(REPLY_1)).toBeInTheDocument()
     expect(chatCalls(fetchMock)).toEqual([
       { message: 'Tell me about the ELIZA chatbot.', session_id: 's_1' },
     ])
-    // Context tab is open by default and shows the instructions and input sent.
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeInTheDocument()
+
+    // Context tab is open by default.
     expect(screen.getByText('Test system prompt.')).toBeInTheDocument()
     expect(screen.getByText('none (first message)')).toBeInTheDocument()
-    expect(screen.getByText('Raw response')).toBeInTheDocument()
+    expect(screen.getByText('yes')).toBeInTheDocument() // Streaming: yes
 
     await user.click(screen.getByRole('tab', { name: 'Metrics' }))
     expect(screen.getByText('4.2 s', { selector: '.stat-value' })).toBeInTheDocument()
+    expect(screen.getByText('900 ms', { selector: '.stat-value' })).toBeInTheDocument()
+    expect(screen.getByText('Chunks').nextSibling?.textContent).toBe('2')
+    expect(screen.getByText('~121 tok/s')).toBeInTheDocument() // 400 tokens / 3.3 s
     expect(screen.getByText('resp_1')).toBeInTheDocument()
-    expect(screen.getByText('completed')).toBeInTheDocument()
   })
 
-  it('keeps using the same session, and shows the previous response id on a follow-up', async () => {
+  it('shows the answer while it arrives and swaps Send for Stop', async () => {
+    let feed!: ReturnType<typeof controlledStream>
+    mockBackend({
+      stream: (_n, _body, signal) => {
+        feed = controlledStream(signal)
+        return feed.response
+      },
+    })
+    const user = userEvent.setup()
+    const { container } = render(<App />)
+
+    await sendMessage(user, 'hi')
+    await screen.findByText('Thinking…')
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument()
+
+    feed.push(META() + delta('ELIZA was '))
+    expect(await screen.findByText('ELIZA was')).toBeInTheDocument()
+    expect(screen.queryByText('Thinking…')).not.toBeInTheDocument()
+    expect(container.querySelector('.caret')).not.toBeNull()
+    expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+
+    feed.push(delta('an early chatbot.', 3))
+    expect(await screen.findByText(REPLY_1)).toBeInTheDocument()
+
+    feed.push(sse('completed', { reply: REPLY_1, inspector: inspector(1, REPLY_1, 'hi') }))
+    feed.close()
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeInTheDocument()
+    expect(container.querySelector('.caret')).toBeNull()
+  })
+
+  it('keeps the same session across turns and shows the previous response id', async () => {
     const fetchMock = mockBackend({
-      chat: (n) =>
-        jsonResponse(
-          n === 1
-            ? chatReply(1)
-            : chatReply(2, 'It was far simpler than modern LLMs.', 'How does it compare to modern LLMs?'),
-        ),
+      stream: (n, body) => sseResponse(fullStream(n, n === 1 ? REPLY_1 : REPLY_2, body.message)),
     })
     const user = userEvent.setup()
     render(<App />)
 
     await sendMessage(user, 'Tell me about the ELIZA chatbot.')
-    await screen.findByText('ELIZA was an early chatbot.')
+    await screen.findByText(REPLY_1)
     await sendMessage(user, 'How does it compare to modern LLMs?')
-    await screen.findByText('It was far simpler than modern LLMs.')
+    await screen.findByText(REPLY_2)
 
     expect(chatCalls(fetchMock).map((c) => c.session_id)).toEqual(['s_1', 's_1'])
     expect(screen.getByText('resp_1', { selector: '.mono--accent' })).toBeInTheDocument()
@@ -150,27 +242,21 @@ describe('App', () => {
 
   it('shows the response chain, transcript mirror and token growth', async () => {
     mockBackend({
-      chat: (n) =>
-        jsonResponse(
-          n === 1
-            ? chatReply(1)
-            : chatReply(2, 'It was far simpler than modern LLMs.', 'How does it compare to modern LLMs?'),
-        ),
+      stream: (n, body) => sseResponse(fullStream(n, n === 1 ? REPLY_1 : REPLY_2, body.message)),
     })
     const user = userEvent.setup()
     render(<App />)
 
     await sendMessage(user, 'first')
-    await screen.findByText('ELIZA was an early chatbot.')
+    await screen.findByText(REPLY_1)
     await sendMessage(user, 'second')
-    await screen.findByText('It was far simpler than modern LLMs.')
+    await screen.findByText(REPLY_2)
 
     await user.click(screen.getByRole('tab', { name: 'Memory' }))
     const chain = within(document.querySelector('.chain') as HTMLElement)
     expect(chain.getByText('resp_1')).toBeInTheDocument()
     expect(chain.getByText('resp_2')).toBeInTheDocument()
     expect(chain.getByText('latest')).toBeInTheDocument()
-    expect(screen.getByText('How does it compare to modern LLMs?', { selector: '.transcript-row' })).toBeInTheDocument()
     expect(await screen.findByText(/did not return stored input items/)).toBeInTheDocument()
 
     await user.click(screen.getByRole('tab', { name: 'Metrics' }))
@@ -178,6 +264,31 @@ describe('App', () => {
     expect(rows).toHaveLength(2)
     expect(rows[0].textContent).toContain('38')
     expect(rows[1].textContent).toContain('76')
+    expect(rows[1].textContent).toContain('900 ms') // first token
+  })
+
+  it('lists the model events live in the Raw events tab and resets them each turn', async () => {
+    mockBackend({
+      stream: (n, body) => sseResponse(fullStream(n, n === 1 ? REPLY_1 : REPLY_2, body.message)),
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.click(screen.getByRole('tab', { name: 'Raw events' }))
+    expect(screen.getByText(/Send a message to see the live events/)).toBeInTheDocument()
+
+    await sendMessage(user, 'first')
+    await screen.findByText(REPLY_1)
+
+    const log = within(screen.getByRole('log', { name: 'Raw events' }))
+    expect(log.getAllByText('response.output_text.delta')).toHaveLength(2)
+    expect(log.getByText('response.created')).toBeInTheDocument()
+    expect(log.getByText('response.completed')).toBeInTheDocument()
+    expect(screen.getByText(/4 events for the last turn/)).toBeInTheDocument()
+
+    await sendMessage(user, 'second')
+    await screen.findByText(REPLY_2)
+    expect(screen.getByText(/4 events for the last turn/)).toBeInTheDocument()
   })
 
   it('shows server items when the service returns them', async () => {
@@ -196,45 +307,181 @@ describe('App', () => {
     render(<App />)
 
     await sendMessage(user, 'hello')
-    await screen.findByText('ELIZA was an early chatbot.')
+    await screen.findByText(REPLY_1)
     await user.click(screen.getByRole('tab', { name: 'Memory' }))
 
     expect(await screen.findByText('Input items stored for the last response')).toBeInTheDocument()
   })
+})
 
-  it('shows a readable error and stays usable when the backend fails', async () => {
+// ---------- failures and Stop ----------
+
+describe('failures and Stop', () => {
+  it('keeps the partial text and shows the error when the stream fails midway', async () => {
     mockBackend({
-      chat: () =>
-        jsonResponse({ error: { code: 'auth_failed', message: 'Authentication failed. Check the API key.' } }, 401),
+      stream: () =>
+        sseResponse(
+          META() + delta('Partial answer ') + sse('error', { code: 'upstream_error', message: 'The model service had a problem.' }),
+        ),
+    })
+    const user = userEvent.setup()
+    const { container } = render(<App />)
+
+    await sendMessage(user, 'hello')
+
+    expect(await screen.findByText('The model service had a problem.')).toBeInTheDocument()
+    expect(screen.getByText('Partial answer')).toBeInTheDocument()
+    expect(container.querySelector('.caret')).toBeNull()
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Message')).toBeEnabled()
+  })
+
+  it('shows a readable error when the request is rejected before streaming', async () => {
+    mockBackend({
+      stream: () =>
+        new Response(JSON.stringify({ error: { code: 'auth_failed', message: 'Authentication failed. Check the API key.' } }), {
+          status: 401,
+        }),
     })
     const user = userEvent.setup()
     render(<App />)
 
     await sendMessage(user, 'hello')
 
-    await waitFor(() => expect(screen.getByText(/Check the API key/)).toBeInTheDocument())
-    expect(screen.getByLabelText('Message')).toBeEnabled()
+    expect(await screen.findByText(/Check the API key/)).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeInTheDocument()
+  })
+
+  it('reports an answer that stops without finishing', async () => {
+    mockBackend({ stream: () => sseResponse(META() + delta('Half an ans')) })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await sendMessage(user, 'hello')
+
+    expect(await screen.findByText('The connection ended before the answer was complete.')).toBeInTheDocument()
+    expect(screen.getByText('Half an ans')).toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeInTheDocument()
+  })
+
+  it('reports a lost connection while streaming', async () => {
+    mockBackend({
+      stream: (_n, _body, signal) => {
+        const feed = controlledStream(signal)
+        feed.push(META() + delta('Some text '))
+        setTimeout(() => feed.close(), 0) // closes cleanly, but with no completed event
+        return feed.response
+      },
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await sendMessage(user, 'hello')
+
+    expect(await screen.findByText(/connection ended before the answer was complete/)).toBeInTheDocument()
   })
 
   it('starts a new session when the server has forgotten the old one', async () => {
     const fetchMock = mockBackend({
-      chat: (n) =>
+      stream: (n) =>
         n === 1
-          ? jsonResponse({ error: { code: 'session_not_found', message: 'The server forgot this conversation.' } }, 404)
-          : jsonResponse(chatReply(2)),
+          ? new Response(JSON.stringify({ error: { code: 'session_not_found', message: 'The server forgot this conversation.' } }), { status: 404 })
+          : sseResponse(fullStream(2, REPLY_1)),
     })
     const user = userEvent.setup()
     render(<App />)
 
     await sendMessage(user, 'hello')
     expect(await screen.findByText('The server forgot this conversation.')).toBeInTheDocument()
+    await waitFor(() => expect(sessionCreations(fetchMock)).toBe(2))
 
-    await waitFor(() =>
-      expect(fetchMock.mock.calls.filter(([url, init]) => url === '/api/sessions' && init?.method === 'POST')).toHaveLength(2),
-    )
     await sendMessage(user, 'hello again')
-    await screen.findByText('ELIZA was an early chatbot.')
+    await screen.findByText(REPLY_1)
     expect(chatCalls(fetchMock).map((c) => c.session_id)).toEqual(['s_1', 's_2'])
+  })
+
+  it('also recovers when the lost session is reported inside the stream', async () => {
+    const fetchMock = mockBackend({
+      stream: (n) =>
+        n === 1
+          ? sseResponse(META() + sse('error', { code: 'session_not_found', message: 'Session gone.' }))
+          : sseResponse(fullStream(2, REPLY_1)),
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await sendMessage(user, 'hello')
+    expect(await screen.findByText('Session gone.')).toBeInTheDocument()
+    await waitFor(() => expect(sessionCreations(fetchMock)).toBe(2))
+  })
+
+  it('Stop keeps the partial answer, marks it as not saved and allows a new message', async () => {
+    const fetchMock = mockBackend({
+      stream: (n, _body, signal) => {
+        if (n > 1) return sseResponse(fullStream(n, REPLY_2))
+        const feed = controlledStream(signal)
+        feed.push(META() + delta('ELIZA was '))
+        return feed.response
+      },
+    })
+    const user = userEvent.setup()
+    const { container } = render(<App />)
+
+    await sendMessage(user, 'hi')
+    expect(await screen.findByText('ELIZA was')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Stop' }))
+
+    expect(await screen.findByText(/Stopped\. This answer is not saved/)).toBeInTheDocument()
+    expect(screen.getByText('ELIZA was')).toBeInTheDocument()
+    expect(container.querySelector('.caret')).toBeNull()
+    expect(screen.queryByText(/connection/i)).not.toBeInTheDocument()
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeInTheDocument()
+
+    await sendMessage(user, 'again')
+    await screen.findByText(REPLY_2)
+    expect(chatCalls(fetchMock)).toHaveLength(2)
+  })
+
+  it('Stop before the first word leaves no error behind', async () => {
+    mockBackend({
+      stream: (_n, _body, signal) => controlledStream(signal).response,
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await sendMessage(user, 'hi')
+    await user.click(await screen.findByRole('button', { name: 'Stop' }))
+
+    expect(await screen.findByRole('button', { name: 'Send' })).toBeInTheDocument()
+    expect(screen.queryByText('Thinking…')).not.toBeInTheDocument()
+    expect(document.querySelector('.bubble--error')).toBeNull()
+  })
+
+  it('New chat during a stream cancels it and starts a fresh conversation', async () => {
+    const fetchMock = mockBackend({
+      stream: (n, _body, signal) => {
+        if (n > 1) return sseResponse(fullStream(n, REPLY_2))
+        const feed = controlledStream(signal)
+        feed.push(META() + delta('ELIZA was '))
+        return feed.response
+      },
+    })
+    const user = userEvent.setup()
+    render(<App />)
+
+    await sendMessage(user, 'hi')
+    await screen.findByText('ELIZA was')
+
+    await user.click(screen.getByRole('button', { name: 'New chat' }))
+
+    await waitFor(() => expect(screen.queryByText('ELIZA was')).not.toBeInTheDocument())
+    expect(screen.getByText('Start a conversation')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledWith('/api/sessions/s_1', { method: 'DELETE' })
+
+    await sendMessage(user, 'fresh start')
+    await screen.findByText(REPLY_2)
+    expect(chatCalls(fetchMock)[1]).toEqual({ message: 'fresh start', session_id: 's_2' })
   })
 
   it('New chat deletes the old session, clears the screen and starts a new session', async () => {
@@ -243,38 +490,32 @@ describe('App', () => {
     render(<App />)
 
     await sendMessage(user, 'hi')
-    await screen.findByText('ELIZA was an early chatbot.')
+    await screen.findByText(REPLY_1)
 
     await user.click(screen.getByRole('button', { name: 'New chat' }))
 
-    expect(screen.queryByText('ELIZA was an early chatbot.')).not.toBeInTheDocument()
+    expect(screen.queryByText(REPLY_1)).not.toBeInTheDocument()
     expect(screen.getByText('Start a conversation')).toBeInTheDocument()
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled())
     expect(fetchMock).toHaveBeenCalledWith('/api/sessions/s_1', { method: 'DELETE' })
-
-    await sendMessage(user, 'fresh start')
-    await waitFor(() => expect(chatCalls(fetchMock)).toHaveLength(2))
-    expect(chatCalls(fetchMock)[1]).toEqual({ message: 'fresh start', session_id: 's_2' })
   })
 })
 
+// ---------- markdown, theme, helpers ----------
+
 describe('markdown in AI replies', () => {
-  const markdownReply = {
-    ...chatReply(1),
-    reply: [
-      'I can help with:',
-      '',
-      '- **Writing**: emails and essays',
-      '- **Coding**: debugging',
-      '',
-      'Use `pip install` to start.',
-      '',
-      '<script>alert(1)</script>',
-    ].join('\n'),
-  }
+  const markdown = [
+    'I can help with:',
+    '',
+    '- **Writing**: emails and essays',
+    '- **Coding**: debugging',
+    '',
+    'Use `pip install` to start.',
+    '',
+    '<script>alert(1)</script>',
+  ].join('\n')
 
   it('renders bold text, lists and inline code instead of raw markdown symbols', async () => {
-    mockBackend({ chat: () => jsonResponse(markdownReply) })
+    mockBackend({ stream: (n) => sseResponse(fullStream(n, markdown)) })
     const user = userEvent.setup()
     const { container } = render(<App />)
 
@@ -288,7 +529,7 @@ describe('markdown in AI replies', () => {
   })
 
   it('does not turn raw HTML in a reply into real elements', async () => {
-    mockBackend({ chat: () => jsonResponse(markdownReply) })
+    mockBackend({ stream: (n) => sseResponse(fullStream(n, markdown)) })
     const user = userEvent.setup()
     const { container } = render(<App />)
 
@@ -304,7 +545,7 @@ describe('markdown in AI replies', () => {
     const { container } = render(<App />)
 
     await sendMessage(user, '**not bold**')
-    await screen.findByText('ELIZA was an early chatbot.')
+    await screen.findByText(REPLY_1)
 
     expect(container.querySelector('.bubble--user .bubble-text')?.textContent).toBe('**not bold**')
   })
@@ -342,5 +583,13 @@ describe('format helpers', () => {
     expect(formatNumber(null)).toBe('—')
     expect(formatLatency(850)).toBe('850 ms')
     expect(formatLatency(4200)).toBe('4.2 s')
+    expect(formatLatency(null)).toBe('—')
+  })
+
+  it('computes the approximate speed after the first token', () => {
+    expect(formatSpeed(400, { latency_ms: 4200, ttft_ms: 900 })).toBe('~121 tok/s')
+    expect(formatSpeed(400, { latency_ms: 4200, ttft_ms: null })).toBe('—')
+    expect(formatSpeed(null, { latency_ms: 4200, ttft_ms: 900 })).toBe('—')
+    expect(formatSpeed(400, { latency_ms: 900, ttft_ms: 900 })).toBe('—')
   })
 })

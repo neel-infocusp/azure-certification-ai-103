@@ -60,6 +60,9 @@ class Usage(BaseModel):
 
 class TurnMetrics(BaseModel):
     latency_ms: int
+    # Streaming only: time until the first text arrived, and how many chunks there were.
+    ttft_ms: int | None = None
+    chunk_count: int | None = None
 
 
 class TranscriptMessage(BaseModel):

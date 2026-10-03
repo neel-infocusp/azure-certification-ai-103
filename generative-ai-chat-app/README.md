@@ -7,7 +7,7 @@ A small chat application built on **Microsoft Foundry** and the **OpenAI Python 
 - **Model:** a `gpt-5.2` deployment in a Microsoft Foundry project
 - **Auth:** an API key from the Foundry portal (simplest), or Microsoft Entra ID via `az login`
 
-> **Status: Round 3 of 5.** Chat using the Responses API with **conversation memory** (`previous_response_id`), sessions and a Memory tab. Later rounds add streaming and async.
+> **Status: Round 4 of 5.** Chat using the Responses API with conversation memory and **streaming**: the answer appears as it is written, with a Stop button, time-to-first-token and a live Raw events log. The last round adds async.
 
 ## Prerequisites
 
@@ -60,7 +60,7 @@ npm run dev
 
 Open http://localhost:5173. The header shows the model and a connection status.
 
-Try: `Tell me about the ELIZA chatbot.`, then `How does it compare to modern LLMs?`. The model now understands "it": open the **Memory** tab to see the response chain and transcript, and the **Metrics** tab to see input tokens grow. **New chat** starts a conversation with empty memory.
+Try: `Tell me about the ELIZA chatbot.`, then `How does it compare to modern LLMs?`. The answer streams in as it is written (press **Stop** to cancel). Open **Raw events** to watch the model's events live, **Metrics** for time to first token and speed, and **Memory** for the response chain. **New chat** starts a conversation with empty memory.
 
 ## Test
 

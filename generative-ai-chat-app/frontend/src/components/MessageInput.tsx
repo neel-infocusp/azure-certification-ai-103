@@ -2,13 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 
 interface Props {
+  /** True while the app cannot accept a message (starting up). */
   disabled: boolean
+  /** True while an answer is being produced: Send turns into Stop. */
+  generating: boolean
   onSend: (text: string) => void
+  onStop: () => void
 }
 
 const MAX_HEIGHT_PX = 160
 
-export function MessageInput({ disabled, onSend }: Props) {
+export function MessageInput({ disabled, generating, onSend, onStop }: Props) {
   const [text, setText] = useState('')
   const ref = useRef<HTMLTextAreaElement>(null)
 
@@ -22,7 +26,7 @@ export function MessageInput({ disabled, onSend }: Props) {
 
   const submit = () => {
     const value = text.trim()
-    if (!value || disabled) return
+    if (!value || disabled || generating) return
     onSend(value)
     setText('')
   }
@@ -51,9 +55,15 @@ export function MessageInput({ disabled, onSend }: Props) {
         onChange={(event) => setText(event.target.value)}
         onKeyDown={onKeyDown}
       />
-      <button type="submit" className="btn btn--primary" disabled={disabled || !text.trim()}>
-        Send
-      </button>
+      {generating ? (
+        <button type="button" className="btn btn--stop" onClick={onStop}>
+          Stop
+        </button>
+      ) : (
+        <button type="submit" className="btn btn--primary" disabled={disabled || !text.trim()}>
+          Send
+        </button>
+      )}
     </form>
   )
 }
