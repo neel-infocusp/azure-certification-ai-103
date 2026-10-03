@@ -10,5 +10,5 @@ def test_health_returns_config_sanity_without_secrets(client: TestClient) -> Non
         "status": "ok",
         "model_deployment": "gpt-test",
         "endpoint_host": "my-resource.openai.azure.com",
-        "round": 2,
+        "round": 3,
     }

@@ -16,14 +16,23 @@ export function ContextTab({ snapshot }: { snapshot: InspectorSnapshot | null })
         <dt>Streaming</dt>
         <dd>{request.stream ? 'yes' : 'no'}</dd>
         <dt>previous_response_id</dt>
-        <dd>none</dd>
+        <dd className={request.previous_response_id ? 'mono mono--accent' : ''}>
+          {request.previous_response_id ?? 'none (first message)'}
+        </dd>
       </dl>
       <h3 className="tab-subtitle">instructions</h3>
       <pre className="code code--wrap">{request.instructions}</pre>
       <h3 className="tab-subtitle">input</h3>
       <pre className="code code--wrap">{request.input}</pre>
       <p className="note">
-        No <code>previous_response_id</code> is sent, so the model cannot see earlier messages.
+        {request.previous_response_id ? (
+          <>
+            The service uses <code>previous_response_id</code> to load the earlier conversation.
+            Only the new message is sent as <code>input</code>.
+          </>
+        ) : (
+          <>First message of the conversation: there is nothing to link back to yet.</>
+        )}
       </p>
       {raw && (
         <details className="raw">

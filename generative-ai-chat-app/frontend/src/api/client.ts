@@ -1,4 +1,4 @@
-import type { ChatResponse, ErrorCode, HealthResponse } from '../types'
+import type { ChatResponse, ErrorCode, HealthResponse, MemoryResponse } from '../types'
 
 export class ApiError extends Error {
   readonly code: ErrorCode
@@ -25,6 +25,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (response.ok) {
+    if (response.status === 204) return undefined as T
     return (await response.json()) as T
   }
 
@@ -49,10 +50,23 @@ export function getHealth(): Promise<HealthResponse> {
   return request<HealthResponse>('/api/health')
 }
 
-export function postChat(message: string): Promise<ChatResponse> {
+export function postChat(message: string, sessionId: string): Promise<ChatResponse> {
   return request<ChatResponse>('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ message, session_id: sessionId }),
   })
+}
+
+export async function createSession(): Promise<string> {
+  const created = await request<{ session_id: string }>('/api/sessions', { method: 'POST' })
+  return created.session_id
+}
+
+export function deleteSession(sessionId: string): Promise<void> {
+  return request<void>(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+}
+
+export function getMemory(sessionId: string): Promise<MemoryResponse> {
+  return request<MemoryResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/memory`)
 }

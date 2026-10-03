@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { SessionTotals } from '../../hooks/useChat'
-import type { InspectorSnapshot } from '../../types'
+import type { InspectorSnapshot, TurnStat } from '../../types'
 import { ContextTab } from './ContextTab'
 import { MemoryTab } from './MemoryTab'
 import { MetricsTab } from './MetricsTab'
@@ -17,10 +17,12 @@ type TabId = (typeof TABS)[number]['id']
 
 interface Props {
   snapshot: InspectorSnapshot | null
+  turns: TurnStat[]
   totals: SessionTotals
+  sessionId: string | null
 }
 
-export function InspectorPanel({ snapshot, totals }: Props) {
+export function InspectorPanel({ snapshot, turns, totals, sessionId }: Props) {
   const [active, setActive] = useState<TabId>('context')
 
   return (
@@ -43,8 +45,8 @@ export function InspectorPanel({ snapshot, totals }: Props) {
       </div>
       <div className="inspector-body" id="inspector-body" role="tabpanel" aria-labelledby={`tab-${active}`}>
         {active === 'context' && <ContextTab snapshot={snapshot} />}
-        {active === 'memory' && <MemoryTab />}
-        {active === 'metrics' && <MetricsTab snapshot={snapshot} totals={totals} />}
+        {active === 'memory' && <MemoryTab snapshot={snapshot} sessionId={sessionId} />}
+        {active === 'metrics' && <MetricsTab snapshot={snapshot} turns={turns} totals={totals} />}
         {active === 'events' && <RawEventsTab />}
       </div>
     </>
