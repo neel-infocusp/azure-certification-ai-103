@@ -1,6 +1,8 @@
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from app.auth import build_api_key
+import pytest
+
+from app.auth import Auth, build_auth
 from app.config import Settings
 
 
@@ -14,14 +16,37 @@ def _settings(api_key: str | None) -> Settings:
 
 
 def test_api_key_is_used_when_configured() -> None:
-    with patch("app.auth.build_token_provider") as entra:
-        assert build_api_key(_settings("  secret-key  ")) == "secret-key"
-        entra.assert_not_called()
+    with patch("app.auth.DefaultAzureCredential") as credential:
+        auth = build_auth(_settings("  secret-key  "))
+
+    assert auth.api_key == "secret-key"
+    assert auth.credential is None
+    credential.assert_not_called()
 
 
-def test_entra_id_is_used_when_key_is_missing_or_blank() -> None:
-    for value in (None, "", "   "):
-        with patch("app.auth.build_token_provider", return_value=lambda: "token") as entra:
-            result = build_api_key(_settings(value))
-            entra.assert_called_once()
-            assert callable(result)
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_entra_id_is_used_when_key_is_missing_or_blank(value: str | None) -> None:
+    with (
+        patch("app.auth.DefaultAzureCredential") as credential,
+        patch("app.auth.get_bearer_token_provider", return_value="token-provider") as provider,
+    ):
+        auth = build_auth(_settings(value))
+
+    credential.assert_called_once()
+    provider.assert_called_once()
+    assert auth.api_key == "token-provider"
+    assert auth.credential is credential.return_value
+
+
+@pytest.mark.anyio
+async def test_closing_closes_the_async_credential() -> None:
+    credential = AsyncMock()
+
+    await Auth(api_key="token-provider", credential=credential).close()
+
+    credential.close.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_closing_an_api_key_auth_does_nothing() -> None:
+    await Auth(api_key="secret-key").close()  # must not raise

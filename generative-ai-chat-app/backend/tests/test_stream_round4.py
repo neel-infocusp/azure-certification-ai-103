@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 from typing import Any
 
+import anyio
 import httpx
 import openai
 import pytest
@@ -253,8 +254,8 @@ def test_session_deleted_while_streaming_is_reported_in_band(
     # The session disappears (New chat) before the answer finishes.
     original_create = fake_client.responses.create
 
-    def create_then_delete(**kwargs: Any) -> Any:
-        result = original_create(**kwargs)
+    async def create_then_delete(**kwargs: Any) -> Any:
+        result = await original_create(**kwargs)
         store.delete(session_id)
         return result
 
@@ -266,24 +267,45 @@ def test_session_deleted_while_streaming_is_reported_in_band(
     assert frames[-1][1]["code"] == "session_not_found"
 
 
-def test_stopping_early_closes_the_upstream_stream(
+@pytest.mark.anyio
+async def test_stopping_early_closes_the_upstream_stream(
     fake_client: FakeClient, settings: Settings
 ) -> None:
     service = LlmService(fake_client, settings)  # type: ignore[arg-type]
     events = service.stream_chat("hi")
 
-    assert next(events).event == "meta"
-    assert next(events).event == "raw"
-    events.close()  # what happens when the client disconnects
+    assert (await anext(events)).event == "meta"
+    assert (await anext(events)).event == "raw"
+    await events.aclose()  # what happens when the client disconnects
 
     assert fake_client.responses.streams[0].closed is True
 
 
-def test_stream_is_closed_after_normal_completion(
+@pytest.mark.anyio
+async def test_stream_is_closed_after_normal_completion(
     fake_client: FakeClient, settings: Settings
 ) -> None:
     service = LlmService(fake_client, settings)  # type: ignore[arg-type]
 
-    list(service.stream_chat("hi"))
+    events = [event async for event in service.stream_chat("hi")]
+
+    assert events[-1].event == "completed"
+    assert fake_client.responses.streams[0].closed is True
+
+
+@pytest.mark.anyio
+async def test_cancelled_stream_still_closes_the_upstream_stream(
+    fake_client: FakeClient, settings: Settings
+) -> None:
+    """A disconnect cancels the request. The close must still finish (it is shielded)."""
+    fake_client.responses.delay = 0.05
+    service = LlmService(fake_client, settings)  # type: ignore[arg-type]
+
+    async def consume() -> None:
+        async for _ in service.stream_chat("hi"):
+            pass
+
+    with anyio.move_on_after(0.12):
+        await consume()
 
     assert fake_client.responses.streams[0].closed is True

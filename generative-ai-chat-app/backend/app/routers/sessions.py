@@ -8,13 +8,13 @@ router = APIRouter(prefix="/api/sessions")
 
 
 @router.post("", response_model=SessionCreated, status_code=status.HTTP_201_CREATED)
-def create_session(store: SessionStore = Depends(get_session_store)) -> SessionCreated:
+async def create_session(store: SessionStore = Depends(get_session_store)) -> SessionCreated:
     """Start a new conversation with empty memory."""
     return SessionCreated(session_id=store.create().session_id)
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_session(
+async def delete_session(
     session_id: str, store: SessionStore = Depends(get_session_store)
 ) -> Response:
     """Forget a conversation (New chat). Deleting an unknown session is not an error."""
@@ -23,7 +23,7 @@ def delete_session(
 
 
 @router.get("/{session_id}/memory", response_model=MemoryResponse)
-def get_memory(
+async def get_memory(
     session_id: str,
     store: SessionStore = Depends(get_session_store),
     llm: LlmService = Depends(get_llm_service),
@@ -35,7 +35,7 @@ def get_memory(
     items: list[dict] | None = None
     note: str | None = None
     if last_id:
-        items, note = llm.list_input_items(last_id)
+        items, note = await llm.list_input_items(last_id)
     else:
         note = "No response yet, so there is nothing stored on the server."
 

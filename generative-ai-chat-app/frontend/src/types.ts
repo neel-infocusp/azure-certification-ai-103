@@ -55,6 +55,13 @@ export interface InspectorSnapshot {
   raw: Record<string, unknown> | null
 }
 
+/** How busy the backend is (GET /api/stats). */
+export interface Stats {
+  in_flight: number
+  total_requests: number
+  avg_latency_ms: number | null
+}
+
 export interface HealthResponse {
   status: 'ok'
   model_deployment: string

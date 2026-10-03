@@ -1,16 +1,18 @@
 import type { HealthState } from '../hooks/useHealth'
+import type { Stats } from '../types'
 import type { Theme } from '../hooks/useTheme'
 import { ThemeToggle } from './ThemeToggle'
 
 interface Props {
   health: HealthState
+  stats: Stats | null
   canReset: boolean
   onNewChat: () => void
   theme: Theme
   onToggleTheme: () => void
 }
 
-export function Header({ health, canReset, onNewChat, theme, onToggleTheme }: Props) {
+export function Header({ health, stats, canReset, onNewChat, theme, onToggleTheme }: Props) {
   const label =
     health.status === 'ok'
       ? 'Connected'
@@ -29,6 +31,14 @@ export function Header({ health, canReset, onNewChat, theme, onToggleTheme }: Pr
             </span>
             <span className="badge badge--accent">Round {health.data.round}</span>
           </>
+        )}
+        {stats && (
+          <span
+            className={`badge badge--live ${stats.in_flight > 0 ? 'badge--busy' : ''}`}
+            title={`Model calls running right now. ${stats.total_requests} served since the backend started.`}
+          >
+            In flight: {stats.in_flight}
+          </span>
         )}
         <span className={`status status--${health.status}`} role="status">
           <span className="status-dot" aria-hidden="true" />

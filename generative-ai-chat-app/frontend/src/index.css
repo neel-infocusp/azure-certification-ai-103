@@ -646,6 +646,18 @@ textarea:focus-visible {
   color: var(--muted);
 }
 
+.badge--live {
+  font-family: inherit;
+  color: var(--muted);
+}
+
+.badge--busy {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .btn--stop {
   background: var(--error-bg);
   border-color: var(--error-border);

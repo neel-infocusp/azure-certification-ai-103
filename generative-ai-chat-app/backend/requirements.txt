@@ -2,6 +2,7 @@ fastapi>=0.142
 uvicorn[standard]>=0.54
 openai>=3.23
 azure-identity>=1.26
+aiohttp>=3.14  # needed by azure.identity.aio (the async sign-in)
 pydantic-settings>=2.15
 
 # dev / test

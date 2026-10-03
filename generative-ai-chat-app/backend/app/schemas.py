@@ -108,6 +108,13 @@ class MemoryResponse(BaseModel):
     server_items_note: str | None = None
 
 
+class StatsResponse(BaseModel):
+    in_flight: int
+    total_requests: int
+    # Average over successful calls only; None until one has finished.
+    avg_latency_ms: int | None = None
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     model_deployment: str

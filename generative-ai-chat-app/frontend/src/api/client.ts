@@ -1,4 +1,4 @@
-import type { ErrorCode, HealthResponse, MemoryResponse, StreamEvent } from '../types'
+import type { ErrorCode, HealthResponse, MemoryResponse, Stats, StreamEvent } from '../types'
 import { createSseParser } from './sse'
 
 export class ApiError extends Error {
@@ -53,6 +53,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getHealth(): Promise<HealthResponse> {
   return request<HealthResponse>('/api/health')
+}
+
+export function getStats(): Promise<Stats> {
+  return request<Stats>('/api/stats')
 }
 
 export async function createSession(): Promise<string> {
